@@ -13,7 +13,6 @@ export async function POST(request: NextRequest) {
     const { action, audio, text, isFirst, scenario, conversationHistory } = await request.json();
 
     const openaiApiKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY;
-    const sonioxApiKey = process.env.SONIOX_API_KEY;
     const elevenlabsApiKey = process.env.ELEVENLABS_API_KEY;
 
     // OpenAI key is still needed for chat/romanize actions
@@ -24,53 +23,40 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ===== TRANSCRIBE ACTION (Soniox) =====
-    // Configured for Urdu (Arabic script) transcription
+    // ===== TRANSCRIBE ACTION (OpenAI Whisper) =====
+    // Using OpenAI Whisper for reliable speech-to-text
+    // Supports Urdu and many other languages
     if (action === 'transcribe' && audio) {
-      if (!sonioxApiKey) {
-        return NextResponse.json(
-          { error: 'Soniox API key not configured' },
-          { status: 500 }
-        );
-      }
-
       try {
         const audioBuffer = Buffer.from(audio, 'base64');
 
-        // Soniox transcription API with Urdu language configuration
-        // Language code 'ur' ensures output in Arabic Urdu script (not Roman)
-        const response = await fetch('https://api.soniox.com/v1/transcribe?language=ur', {
+        // Create form data for OpenAI Whisper API
+        const formData = new FormData();
+        const audioBlob = new Blob([audioBuffer], { type: 'audio/webm' });
+        formData.append('file', audioBlob, 'audio.webm');
+        formData.append('model', 'whisper-1');
+        formData.append('language', 'ur'); // Urdu language hint
+
+        console.log('Sending audio to Whisper API, size:', audioBuffer.length, 'bytes');
+
+        const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${sonioxApiKey}`,
-            'Content-Type': 'audio/webm',
-            'X-Soniox-Language': 'ur', // Urdu language hint
+            'Authorization': `Bearer ${openaiApiKey}`,
           },
-          body: audioBuffer,
+          body: formData,
         });
 
         if (!response.ok) {
           const errorText = await response.text();
-          console.error('Soniox error response:', errorText);
-          throw new Error('Transcription failed');
+          console.error('Whisper API error:', response.status, errorText);
+          throw new Error(`Transcription failed: ${response.status}`);
         }
 
         const data = await response.json();
+        console.log('Whisper transcription result:', data.text);
 
-        // Soniox returns transcription in different formats
-        // Extract the text (should be in Arabic Urdu script)
-        let transcribedText = '';
-        if (data.text) {
-          transcribedText = data.text;
-        } else if (data.result?.text) {
-          transcribedText = data.result.text;
-        } else if (data.words && Array.isArray(data.words)) {
-          transcribedText = data.words.map((w: { text: string }) => w.text).join(' ');
-        } else if (typeof data === 'string') {
-          transcribedText = data;
-        }
-
-        return NextResponse.json({ text: transcribedText });
+        return NextResponse.json({ text: data.text || '' });
       } catch (error) {
         console.error('Transcription error:', error);
         return NextResponse.json(
@@ -301,6 +287,7 @@ Reply naturally (1-2 sentences). If it's time to end, include [END_CALL] at the 
     // Input text MUST be in Arabic Urdu script for proper pronunciation
     if (action === 'speak' && text) {
       if (!elevenlabsApiKey) {
+        console.error('ElevenLabs API key not configured');
         return NextResponse.json(
           { error: 'ElevenLabs API key not configured' },
           { status: 500 }
@@ -312,16 +299,18 @@ Reply naturally (1-2 sentences). If it's time to end, include [END_CALL] at the 
         // You can change this to any ElevenLabs voice ID
         const voiceId = process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM';
 
+        console.log('Calling ElevenLabs TTS for text:', text.substring(0, 50) + '...');
+
         const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
           method: 'POST',
           headers: {
             'xi-api-key': elevenlabsApiKey,
             'Content-Type': 'application/json',
+            'Accept': 'audio/mpeg',
           },
           body: JSON.stringify({
-            text: text, // Arabic Urdu script text for proper pronunciation
-            model_id: 'eleven_multilingual_v2', // Supports Urdu and other languages
-            language_code: 'ur', // Urdu language code for optimal pronunciation
+            text: text,
+            model_id: 'eleven_multilingual_v2',
             voice_settings: {
               stability: 0.5,
               similarity_boost: 0.75,
@@ -333,11 +322,17 @@ Reply naturally (1-2 sentences). If it's time to end, include [END_CALL] at the 
 
         if (!response.ok) {
           const errorText = await response.text();
-          console.error('ElevenLabs error response:', errorText);
-          throw new Error('Text-to-speech failed');
+          console.error('ElevenLabs error:', response.status, errorText);
+          throw new Error(`Text-to-speech failed: ${response.status} - ${errorText}`);
         }
 
         const audioBuffer = await response.arrayBuffer();
+        console.log('ElevenLabs returned audio, size:', audioBuffer.byteLength, 'bytes');
+
+        if (audioBuffer.byteLength === 0) {
+          throw new Error('ElevenLabs returned empty audio');
+        }
+
         const base64Audio = Buffer.from(audioBuffer).toString('base64');
 
         return NextResponse.json({ audio: base64Audio });
@@ -369,20 +364,19 @@ export async function GET() {
     status: 'UMAR Voice API is running',
     language: 'Urdu (Arabic script)',
     endpoints: {
-      transcribe: 'Speech to Arabic Urdu text - Powered by Soniox (language: ur)',
+      transcribe: 'Speech to text - Powered by OpenAI Whisper (language: ur)',
       romanize: 'Arabic Urdu to Roman Urdu - Powered by OpenAI GPT-4o-mini',
       chat: 'AI customer response in Arabic Urdu - Powered by OpenAI GPT-4o',
-      speak: 'Arabic Urdu text to speech - Powered by ElevenLabs (language_code: ur)',
+      speak: 'Text to speech - Powered by ElevenLabs (eleven_multilingual_v2)',
     },
     requiredEnvVars: [
       'NEXT_PUBLIC_OPENAI_API_KEY',
-      'SONIOX_API_KEY',
       'ELEVENLABS_API_KEY',
       'ELEVENLABS_VOICE_ID (optional)',
     ],
     notes: [
-      'STT outputs Arabic Urdu script (not Roman)',
-      'TTS expects Arabic Urdu script input for proper pronunciation',
+      'STT uses OpenAI Whisper for reliable transcription',
+      'TTS uses ElevenLabs multilingual model for natural speech',
       'Roman Urdu is generated separately for display purposes only',
     ],
   });

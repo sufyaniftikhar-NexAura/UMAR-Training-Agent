@@ -570,13 +570,18 @@ export default function ConversationPage() {
 
   // Speak text using TTS
   const speakText = async (text: string) => {
-    if (isMutedRef.current) return;
-    
+    if (isMutedRef.current) {
+      console.log('TTS skipped - muted');
+      return;
+    }
+
     try {
       // Mute microphone while AI is speaking to prevent feedback
       isMutedRef.current = true;
       setIsMuted(true);
-      
+
+      console.log('Calling TTS API for:', text.substring(0, 50) + '...');
+
       const response = await fetch('/api/voice', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -585,33 +590,49 @@ export default function ConversationPage() {
           text: text
         }),
       });
-      
-      if (!response.ok) throw new Error('TTS failed');
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        console.error('TTS API error:', response.status, errorData);
+        throw new Error(`TTS failed: ${response.status}`);
+      }
       
       const data = await response.json();
-      
+
+      if (!data.audio) {
+        console.error('TTS returned no audio data');
+        throw new Error('No audio data returned');
+      }
+
+      console.log('TTS received audio, creating blob...');
+
       const audioBlob = new Blob(
         [Uint8Array.from(atob(data.audio), c => c.charCodeAt(0))],
         { type: 'audio/mpeg' }
       );
       const audioUrl = URL.createObjectURL(audioBlob);
-      
+
+      console.log('Playing audio, blob size:', audioBlob.size, 'bytes');
+
       return new Promise<void>((resolve) => {
         if (audioRef.current) {
           audioRef.current.src = audioUrl;
           audioRef.current.onended = () => {
+            console.log('Audio playback ended');
             // Unmute mic after AI finishes speaking
             isMutedRef.current = false;
             setIsMuted(false);
             URL.revokeObjectURL(audioUrl);
             resolve();
           };
-          audioRef.current.onerror = () => {
+          audioRef.current.onerror = (e) => {
+            console.error('Audio playback error:', e);
             isMutedRef.current = false;
             setIsMuted(false);
             resolve();
           };
-          audioRef.current.play().catch(() => {
+          audioRef.current.play().catch((e) => {
+            console.error('Audio play() failed:', e);
             isMutedRef.current = false;
             setIsMuted(false);
             resolve();
