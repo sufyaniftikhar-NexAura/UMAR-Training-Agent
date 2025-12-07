@@ -25,6 +25,7 @@ export async function POST(request: NextRequest) {
     }
 
     // ===== TRANSCRIBE ACTION (Soniox) =====
+    // Configured for Urdu (Arabic script) transcription
     if (action === 'transcribe' && audio) {
       if (!sonioxApiKey) {
         return NextResponse.json(
@@ -36,12 +37,14 @@ export async function POST(request: NextRequest) {
       try {
         const audioBuffer = Buffer.from(audio, 'base64');
 
-        // Soniox transcription API
-        const response = await fetch('https://api.soniox.com/v1/transcribe', {
+        // Soniox transcription API with Urdu language configuration
+        // Language code 'ur' ensures output in Arabic Urdu script (not Roman)
+        const response = await fetch('https://api.soniox.com/v1/transcribe?language=ur', {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${sonioxApiKey}`,
             'Content-Type': 'audio/webm',
+            'X-Soniox-Language': 'ur', // Urdu language hint
           },
           body: audioBuffer,
         });
@@ -55,7 +58,7 @@ export async function POST(request: NextRequest) {
         const data = await response.json();
 
         // Soniox returns transcription in different formats
-        // Extract the text from the response
+        // Extract the text (should be in Arabic Urdu script)
         let transcribedText = '';
         if (data.text) {
           transcribedText = data.text;
@@ -254,6 +257,8 @@ Respond naturally as the customer. If the conversation should end, include [END_
     }
     
     // ===== SPEAK ACTION (ElevenLabs) =====
+    // Configured for Urdu (Arabic script) text-to-speech
+    // Input text MUST be in Arabic Urdu script for proper pronunciation
     if (action === 'speak' && text) {
       if (!elevenlabsApiKey) {
         return NextResponse.json(
@@ -274,8 +279,9 @@ Respond naturally as the customer. If the conversation should end, include [END_
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            text: text,
+            text: text, // Arabic Urdu script text for proper pronunciation
             model_id: 'eleven_multilingual_v2', // Supports Urdu and other languages
+            language_code: 'ur', // Urdu language code for optimal pronunciation
             voice_settings: {
               stability: 0.5,
               similarity_boost: 0.75,
@@ -321,17 +327,23 @@ Respond naturally as the customer. If the conversation should end, include [END_
 export async function GET() {
   return NextResponse.json({
     status: 'UMAR Voice API is running',
+    language: 'Urdu (Arabic script)',
     endpoints: {
-      transcribe: 'Convert speech to text (Urdu) - Powered by Soniox',
-      romanize: 'Convert Arabic Urdu to Roman Urdu - Powered by OpenAI',
-      chat: 'Get AI customer response - Powered by OpenAI GPT-4o',
-      speak: 'Convert text to speech - Powered by ElevenLabs',
+      transcribe: 'Speech to Arabic Urdu text - Powered by Soniox (language: ur)',
+      romanize: 'Arabic Urdu to Roman Urdu - Powered by OpenAI GPT-4o-mini',
+      chat: 'AI customer response in Arabic Urdu - Powered by OpenAI GPT-4o',
+      speak: 'Arabic Urdu text to speech - Powered by ElevenLabs (language_code: ur)',
     },
     requiredEnvVars: [
       'NEXT_PUBLIC_OPENAI_API_KEY',
       'SONIOX_API_KEY',
       'ELEVENLABS_API_KEY',
       'ELEVENLABS_VOICE_ID (optional)',
+    ],
+    notes: [
+      'STT outputs Arabic Urdu script (not Roman)',
+      'TTS expects Arabic Urdu script input for proper pronunciation',
+      'Roman Urdu is generated separately for display purposes only',
     ],
   });
 }
