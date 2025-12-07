@@ -115,9 +115,27 @@ export default function ConversationPage() {
       
       console.log('Microphone access granted!');
       streamRef.current = stream;
+
+      // Verify microphone stream is active
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length === 0) {
+        console.error('No audio tracks found in stream');
+        alert('No audio tracks found. Please check your microphone.');
+        return;
+      }
+      console.log('Audio track:', audioTracks[0].label, 'enabled:', audioTracks[0].enabled, 'muted:', audioTracks[0].muted);
       
       // Set up audio context for voice detection
       audioContextRef.current = new AudioContext();
+
+      // CRITICAL: Resume AudioContext - required by modern browsers
+      // AudioContext starts in "suspended" state and must be resumed after user interaction
+      if (audioContextRef.current.state === 'suspended') {
+        console.log('AudioContext is suspended, resuming...');
+        await audioContextRef.current.resume();
+        console.log('AudioContext resumed, state:', audioContextRef.current.state);
+      }
+
       const source = audioContextRef.current.createMediaStreamSource(stream);
       analyserRef.current = audioContextRef.current.createAnalyser();
       analyserRef.current.fftSize = 2048;
@@ -183,9 +201,10 @@ export default function ConversationPage() {
     
     const bufferLength = analyserRef.current.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
-    
+
     let frameCount = 0;
-    
+    let initialLogCount = 0; // Log more frequently at start for debugging
+
     const checkAudio = () => {
       // Use REFS not state - this is critical!
       if (!isMicActiveRef.current) {
@@ -213,15 +232,17 @@ export default function ConversationPage() {
         sum += value * value;
       }
       const volume = Math.sqrt(sum / bufferLength);
-      
-      // Log every 60 frames (~1 second at 60fps) for debugging
+
+      // Voice detected threshold - adjust if needed (lower = more sensitive)
+      const VOICE_THRESHOLD = 0.01;
+
+      // Log for debugging - more frequent at start, then every ~1 second
       frameCount++;
-      if (frameCount % 60 === 0) {
-        console.log('VAD - Volume:', volume.toFixed(4), 'Recording:', isRecordingRef.current);
+      const shouldLog = (initialLogCount < 5 && frameCount % 15 === 0) || frameCount % 60 === 0;
+      if (shouldLog) {
+        console.log('VAD - Volume:', volume.toFixed(4), 'Recording:', isRecordingRef.current, 'Threshold:', VOICE_THRESHOLD);
+        if (initialLogCount < 5 && frameCount % 15 === 0) initialLogCount++;
       }
-      
-      // Voice detected (threshold - adjust if needed)
-      const VOICE_THRESHOLD = 0.01; // Lower = more sensitive
       
       if (volume > VOICE_THRESHOLD) {
         // Clear silence timer
