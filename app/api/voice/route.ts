@@ -11,41 +11,63 @@ interface Message {
 export async function POST(request: NextRequest) {
   try {
     const { action, audio, text, isFirst, scenario, conversationHistory } = await request.json();
-    
-    const apiKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY;
-    
-    if (!apiKey) {
+
+    const openaiApiKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY;
+    const sonioxApiKey = process.env.SONIOX_API_KEY;
+    const elevenlabsApiKey = process.env.ELEVENLABS_API_KEY;
+
+    // OpenAI key is still needed for chat/romanize actions
+    if (!openaiApiKey) {
       return NextResponse.json(
         { error: 'OpenAI API key not configured' },
         { status: 500 }
       );
     }
 
-    // ===== TRANSCRIBE ACTION =====
+    // ===== TRANSCRIBE ACTION (Soniox) =====
     if (action === 'transcribe' && audio) {
+      if (!sonioxApiKey) {
+        return NextResponse.json(
+          { error: 'Soniox API key not configured' },
+          { status: 500 }
+        );
+      }
+
       try {
         const audioBuffer = Buffer.from(audio, 'base64');
-        
-        const formData = new FormData();
-        const audioBlob = new Blob([audioBuffer], { type: 'audio/webm' });
-        formData.append('file', audioBlob, 'audio.webm');
-        formData.append('model', 'whisper-1');
-        formData.append('language', 'ur');
-        
-        const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+
+        // Soniox transcription API
+        const response = await fetch('https://api.soniox.com/v1/transcribe', {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${apiKey}`,
+            'Authorization': `Bearer ${sonioxApiKey}`,
+            'Content-Type': 'audio/webm',
           },
-          body: formData,
+          body: audioBuffer,
         });
-        
+
         if (!response.ok) {
+          const errorText = await response.text();
+          console.error('Soniox error response:', errorText);
           throw new Error('Transcription failed');
         }
-        
+
         const data = await response.json();
-        return NextResponse.json({ text: data.text });
+
+        // Soniox returns transcription in different formats
+        // Extract the text from the response
+        let transcribedText = '';
+        if (data.text) {
+          transcribedText = data.text;
+        } else if (data.result?.text) {
+          transcribedText = data.result.text;
+        } else if (data.words && Array.isArray(data.words)) {
+          transcribedText = data.words.map((w: { text: string }) => w.text).join(' ');
+        } else if (typeof data === 'string') {
+          transcribedText = data;
+        }
+
+        return NextResponse.json({ text: transcribedText });
       } catch (error) {
         console.error('Transcription error:', error);
         return NextResponse.json(
@@ -61,7 +83,7 @@ export async function POST(request: NextRequest) {
         const response = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${apiKey}`,
+            'Authorization': `Bearer ${openaiApiKey}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
@@ -156,7 +178,7 @@ Respond naturally as the customer. If the conversation should end, include [END_
         const response = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${apiKey}`,
+            'Authorization': `Bearer ${openaiApiKey}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
@@ -191,7 +213,7 @@ Respond naturally as the customer. If the conversation should end, include [END_
         const romanResponse = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${apiKey}`,
+            'Authorization': `Bearer ${openaiApiKey}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
@@ -231,30 +253,47 @@ Respond naturally as the customer. If the conversation should end, include [END_
       }
     }
     
-    // ===== SPEAK ACTION =====
+    // ===== SPEAK ACTION (ElevenLabs) =====
     if (action === 'speak' && text) {
+      if (!elevenlabsApiKey) {
+        return NextResponse.json(
+          { error: 'ElevenLabs API key not configured' },
+          { status: 500 }
+        );
+      }
+
       try {
-        const response = await fetch('https://api.openai.com/v1/audio/speech', {
+        // ElevenLabs voice ID - using "Rachel" voice which works well for multilingual
+        // You can change this to any ElevenLabs voice ID
+        const voiceId = process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM';
+
+        const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${apiKey}`,
+            'xi-api-key': elevenlabsApiKey,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            model: 'tts-1',
-            voice: 'alloy',
-            input: text,
-            speed: 1.0,
+            text: text,
+            model_id: 'eleven_multilingual_v2', // Supports Urdu and other languages
+            voice_settings: {
+              stability: 0.5,
+              similarity_boost: 0.75,
+              style: 0.0,
+              use_speaker_boost: true,
+            },
           }),
         });
-        
+
         if (!response.ok) {
+          const errorText = await response.text();
+          console.error('ElevenLabs error response:', errorText);
           throw new Error('Text-to-speech failed');
         }
-        
+
         const audioBuffer = await response.arrayBuffer();
         const base64Audio = Buffer.from(audioBuffer).toString('base64');
-        
+
         return NextResponse.json({ audio: base64Audio });
       } catch (error) {
         console.error('TTS error:', error);
@@ -280,13 +319,19 @@ Respond naturally as the customer. If the conversation should end, include [END_
 }
 
 export async function GET() {
-  return NextResponse.json({ 
+  return NextResponse.json({
     status: 'UMAR Voice API is running',
     endpoints: {
-      transcribe: 'Convert speech to text (Urdu)',
-      romanize: 'Convert Arabic Urdu to Roman Urdu',
-      chat: 'Get AI customer response',
-      speak: 'Convert text to speech'
-    }
+      transcribe: 'Convert speech to text (Urdu) - Powered by Soniox',
+      romanize: 'Convert Arabic Urdu to Roman Urdu - Powered by OpenAI',
+      chat: 'Get AI customer response - Powered by OpenAI GPT-4o',
+      speak: 'Convert text to speech - Powered by ElevenLabs',
+    },
+    requiredEnvVars: [
+      'NEXT_PUBLIC_OPENAI_API_KEY',
+      'SONIOX_API_KEY',
+      'ELEVENLABS_API_KEY',
+      'ELEVENLABS_VOICE_ID (optional)',
+    ],
   });
 }
