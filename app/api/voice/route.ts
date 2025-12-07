@@ -124,58 +124,98 @@ export async function POST(request: NextRequest) {
     if (action === 'chat') {
       try {
         const messages: Message[] = conversationHistory || [];
-        
+
         // Build conversation history for context
         const historyText = messages
           .map(msg => `${msg.role === 'user' ? 'AGENT' : 'CUSTOMER'}: ${msg.content}`)
           .join('\n');
-        
+
+        // Count exchanges to track conversation progress
+        const exchangeCount = messages.filter(m => m.role === 'user').length;
+
         let systemPrompt = '';
         let userPrompt = '';
-        
+
+        // Core conversation behavior rules (applies to all messages)
+        const conversationRules = `
+
+CONVERSATION STYLE - THIS IS CRITICAL:
+1. Keep responses SHORT and natural (1-2 sentences typically, max 3 if explaining something)
+2. Talk like a REAL person on a phone call, not a script
+3. Use natural fillers occasionally: "ہاں...", "دیکھیں...", "اچھا..."
+4. React to what the agent JUST said - don't repeat your whole story
+5. One thought per response - don't pile multiple topics together
+6. If asking a question, just ask ONE question at a time
+7. Show emotion through tone, not long explanations
+
+WHAT MAKES IT FEEL REAL:
+- Interrupt yourself sometimes: "میرا bill... یعنی وہ جو آیا ہے..."
+- React with short acknowledgments: "ہاں ٹھیک ہے", "اچھا", "پھر؟"
+- Express confusion briefly: "مجھے سمجھ نہیں آیا"
+- Show impatience naturally: "ہاں ہاں، پھر؟" or "اور؟"
+
+ADAPTING TO THE AGENT:
+- If agent is helpful and empathetic → warm up, be cooperative
+- If agent is robotic/scripted → show slight annoyance
+- If agent asks good questions → answer willingly
+- If agent repeats themselves → "یہ تو آپ نے بتایا، آگے بتائیں"
+- If agent is rude → react accordingly (hurt/angry depending on persona)
+- If agent solves something → acknowledge it naturally`;
+
         // First message from AI (starting the roleplay)
         if (isFirst) {
-          systemPrompt = scenario.systemPrompt + `
+          systemPrompt = scenario.systemPrompt + conversationRules + `
 
-IMPORTANT: This is your FIRST message to the agent. Start the call naturally as a customer would:
-- Greet them (السلام علیکم)
-- Briefly state your issue
-- Show your emotion (frustrated/confused/angry/calm based on your persona)
-- Don't give away too much detail yet - let the agent ask questions
+FIRST MESSAGE INSTRUCTIONS:
+- Just greet and state your issue briefly (2-3 short sentences max)
+- Don't explain everything upfront - let the conversation unfold
+- Example length: "السلام علیکم، میرا نام احمد ہے، میں اپنے bill کے بارے میں call کر رہا ہوں۔ بہت زیادہ آیا ہے۔"`;
 
-Keep it natural and realistic. Speak in Pakistani Urdu with natural English words mixed in.`;
-
-          userPrompt = 'Start the customer call now. Remember this is your FIRST message as the customer calling SCO.';
+          userPrompt = 'Start the call. Be brief and natural - just greet and state your basic issue.';
         } else {
-          // Continuing conversation
-          systemPrompt = scenario.systemPrompt + `
+          // Calculate conversation state
+          const isEarlyCall = exchangeCount < 3;
+          const isMidCall = exchangeCount >= 3 && exchangeCount < 7;
+          const isLongCall = exchangeCount >= 7;
 
-PREVIOUS CONVERSATION:
+          systemPrompt = scenario.systemPrompt + conversationRules + `
+
+CONVERSATION SO FAR (${exchangeCount} exchanges):
 ${historyText}
 
-CRITICAL INSTRUCTIONS:
-1. Stay in character as the customer
-2. Respond naturally to what the agent just said
-3. React emotionally based on your persona and how the agent is treating you
-4. Ask follow-up questions or raise concerns if the agent's response isn't satisfactory
-5. If the issue is genuinely resolved and you're satisfied, you can naturally end the call
-6. Speak in Pakistani Urdu with natural English words mixed in
+CURRENT CONVERSATION PHASE:
+${isEarlyCall ? '- EARLY: Still explaining issue, asking questions, building rapport' : ''}
+${isMidCall ? '- MIDDLE: Working towards resolution, patience may vary based on agent helpfulness' : ''}
+${isLongCall ? '- EXTENDED: Either close to resolution OR losing patience - time to wrap up naturally' : ''}
 
-ENDING THE CALL:
-If the conversation has reached a natural conclusion (issue resolved, you're satisfied, or you want to escalate/leave):
-- End your message with the phrase: [END_CALL]
-- Say a natural goodbye like "ٹھیک ہے، شکریہ" or "میں بعد میں call کروں گا"
+WHEN TO END THE CALL (add [END_CALL] at the end):
 
-Examples of when to end:
-- Issue is fully resolved and you're happy
-- Agent promised a solution and gave you a reference number
-- You're too frustrated and want to complain elsewhere
-- Conversation is going in circles with no progress
-- You accept you need to visit service center/escalate`;
+POSITIVE ENDINGS:
+- Agent solved the problem → "بہت شکریہ، مسئلہ حل ہو گیا" [END_CALL]
+- Got a satisfactory answer → "اچھا ٹھیک ہے، شکریہ آپ کا" [END_CALL]
+- Received reference number/promise → "ٹھیک ہے، میں انتظار کرتا ہوں" [END_CALL]
+- Agent was very helpful → express genuine thanks and end [END_CALL]
 
-          userPrompt = `The agent just said: "${text}"
+NEUTRAL ENDINGS:
+- Need to think about it → "میں سوچ کر بتاتا ہوں، شکریہ" [END_CALL]
+- Will try suggested solution → "اچھا میں try کرتا ہوں، شکریہ" [END_CALL]
+- Agreed to visit service center → "ٹھیک ہے میں آ جاتا ہوں" [END_CALL]
 
-Respond naturally as the customer. If the conversation should end, include [END_CALL] at the end of your response.`;
+FRUSTRATED ENDINGS (after 5+ exchanges with no progress):
+- Same answers repeated → "آپ وہی بات کر رہے ہیں، میں کہیں اور call کرتا ہوں" [END_CALL]
+- Agent unhelpful → "شکریہ، میں supervisor سے بات کروں گا" [END_CALL]
+- Giving up for now → "ٹھیک ہے بعد میں call کرتا ہوں" [END_CALL]
+- Very frustrated → "میں complaint کروں گا" [END_CALL]
+
+IMPORTANT:
+- Don't end abruptly without a natural closing phrase
+- Don't drag on if the issue is resolved or clearly won't be resolved
+- If conversation exceeds 8-10 exchanges, seriously consider wrapping up
+- Trust your judgment on when the conversation has run its course`;
+
+          userPrompt = `Agent's response: "${text}"
+
+Reply naturally (1-2 sentences). If it's time to end, include [END_CALL] at the end.`;
         }
         
         const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -196,8 +236,8 @@ Respond naturally as the customer. If the conversation should end, include [END_
                 content: userPrompt
               }
             ],
-            temperature: 0.8,
-            max_tokens: 200,
+            temperature: 0.9, // Higher for more natural variation
+            max_tokens: 100, // Reduced to encourage shorter, natural responses
           }),
         });
         
