@@ -11,12 +11,12 @@ export async function POST(request: NextRequest) {
   try {
     const { action, text, isFirst, scenario, conversationHistory } = await request.json();
 
+    // Support both naming conventions for the API key to be safe
     const openaiApiKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY || process.env.OPENAI_API_KEY;
     const elevenlabsApiKey = process.env.ELEVENLABS_API_KEY;
 
     console.log('API route called:', { action, hasOpenAIKey: !!openaiApiKey, hasElevenLabsKey: !!elevenlabsApiKey });
 
-    // OpenAI key is still needed for chat/romanize actions
     if (!openaiApiKey) {
       console.error('OpenAI API key not found in environment');
       return NextResponse.json(
@@ -25,7 +25,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ===== ROMANIZE ACTION =====
+    // ===== ROMANIZE ACTION (Standalone) =====
     if (action === 'romanize' && text) {
       try {
         const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -86,14 +86,6 @@ export async function POST(request: NextRequest) {
 
         // Count exchanges to track conversation progress
         const exchangeCount = messages.filter(m => m.role === 'user').length;
-
-        console.log('Chat request:', {
-          isFirst,
-          exchangeCount,
-          historyLength: historyText.length,
-          scenarioId: scenario.id,
-          hasApiKey: !!openaiApiKey
-        });
 
         let systemPrompt = '';
         let userPrompt = '';
@@ -180,6 +172,7 @@ IMPORTANT:
 Reply naturally (1-2 sentences). If it's time to end, include [END_CALL] at the end.`;
         }
 
+        // 1. Generate AI Response
         const response = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
           headers: {
@@ -187,7 +180,7 @@ Reply naturally (1-2 sentences). If it's time to end, include [END_CALL] at the 
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            model: 'gpt-4o',
+            model: 'gpt-4o-mini', // Using mini for speed and reliability
             messages: [
               {
                 role: 'system',
@@ -199,7 +192,7 @@ Reply naturally (1-2 sentences). If it's time to end, include [END_CALL] at the 
               }
             ],
             temperature: 0.9, // Higher for more natural variation
-            max_tokens: 100, // Reduced to encourage shorter, natural responses
+            max_tokens: 150, // Reduced to encourage shorter, natural responses
           }),
         });
 
@@ -222,34 +215,41 @@ Reply naturally (1-2 sentences). If it's time to end, include [END_CALL] at the 
         const shouldEnd = aiResponse.includes('[END_CALL]');
         aiResponse = aiResponse.replace('[END_CALL]', '').trim();
 
-        // Get romanized version
-        const romanResponse = await fetch('https://api.openai.com/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${openaiApiKey}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model: 'gpt-4o-mini',
-            messages: [
-              {
-                role: 'system',
-                content: 'Convert Urdu text to Roman Urdu. Only output the romanized text.'
-              },
-              {
-                role: 'user',
-                content: aiResponse
-              }
-            ],
-            temperature: 0.3,
-            max_tokens: 200,
-          }),
-        });
-
+        // 2. Get romanized version (SAFELY)
         let roman = '';
-        if (romanResponse.ok) {
-          const romanData = await romanResponse.json();
-          roman = romanData.choices[0].message.content.trim();
+        try {
+          const romanResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${openaiApiKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              model: 'gpt-4o-mini',
+              messages: [
+                {
+                  role: 'system',
+                  content: 'Convert Urdu text to Roman Urdu. Only output the romanized text.'
+                },
+                {
+                  role: 'user',
+                  content: aiResponse
+                }
+              ],
+              temperature: 0.3,
+              max_tokens: 200,
+            }),
+          });
+
+          if (romanResponse.ok) {
+            const romanData = await romanResponse.json();
+            roman = romanData.choices[0].message.content.trim();
+          } else {
+            console.warn('Romanization API failed, proceeding without it');
+          }
+        } catch (romanError) {
+          console.error('Romanization error (non-fatal):', romanError);
+          // We ignore the error and proceed, so the user still gets the audio/text
         }
 
         return NextResponse.json({
@@ -269,7 +269,6 @@ Reply naturally (1-2 sentences). If it's time to end, include [END_CALL] at the 
 
     // ===== SPEAK ACTION (ElevenLabs) =====
     // Configured for Urdu (Arabic script) text-to-speech
-    // Input text MUST be in Arabic Urdu script for proper pronunciation
     if (action === 'speak' && text) {
       if (!elevenlabsApiKey) {
         console.error('ElevenLabs API key not configured');
@@ -280,8 +279,7 @@ Reply naturally (1-2 sentences). If it's time to end, include [END_CALL] at the 
       }
 
       try {
-        // ElevenLabs voice ID - using "Rachel" voice which works well for multilingual
-        // You can change this to any ElevenLabs voice ID
+        // ElevenLabs voice ID
         const voiceId = process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM';
 
         console.log('Calling ElevenLabs TTS for text:', text.substring(0, 50) + '...');
@@ -312,8 +310,7 @@ Reply naturally (1-2 sentences). If it's time to end, include [END_CALL] at the 
         }
 
         const audioBuffer = await response.arrayBuffer();
-        console.log('ElevenLabs returned audio, size:', audioBuffer.byteLength, 'bytes');
-
+        
         if (audioBuffer.byteLength === 0) {
           throw new Error('ElevenLabs returned empty audio');
         }
@@ -350,7 +347,7 @@ export async function GET() {
     language: 'Urdu (Arabic script)',
     endpoints: {
       romanize: 'Arabic Urdu to Roman Urdu - Powered by OpenAI GPT-4o-mini',
-      chat: 'AI customer response in Arabic Urdu - Powered by OpenAI GPT-4o',
+      chat: 'AI customer response in Arabic Urdu - Powered by OpenAI GPT-4o-mini',
       speak: 'Text to speech - Powered by ElevenLabs (eleven_multilingual_v2)',
     },
     stt: {
