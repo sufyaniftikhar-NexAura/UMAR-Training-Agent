@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { Mic, MicOff, Phone, PhoneOff, Volume2, VolumeX } from 'lucide-react';
 import { getRandomScenario, Scenario } from '@/lib/scenarios';
+import { SonioxClient } from '@soniox/speech-to-text-web';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -17,59 +18,237 @@ type VoiceStatus = 'listening' | 'speaking' | 'processing' | 'ai-responding' | '
 
 export default function ConversationPage() {
   const router = useRouter();
-  
+
   // Core state
   const [isConnected, setIsConnected] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [conversationStage, setConversationStage] = useState<ConversationStage>('intro');
   const [currentScenario, setCurrentScenario] = useState<Scenario | null>(null);
-  
+
   // Voice state
   const [isMicActive, setIsMicActive] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>('idle');
   const [isProcessing, setIsProcessing] = useState(false);
-  
+
+  // Real-time transcription display
+  const [partialTranscript, setPartialTranscript] = useState('');
+
   // Display preferences
   const [urduDisplayMode, setUrduDisplayMode] = useState<'both' | 'arabic' | 'roman'>('both');
-  
+
   // Session tracking
   const [sessionStartTime, setSessionStartTime] = useState<Date | null>(null);
-  
-  // Refs - IMPORTANT: Use refs for values checked in animation frames
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
+
+  // Refs
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const isRecordingRef = useRef(false);
-  
-  // CRITICAL: These refs mirror state for use in requestAnimationFrame
-  // React state is async, but refs are synchronous
+  const sonioxClientRef = useRef<SonioxClient | null>(null);
+
+  // CRITICAL: These refs mirror state for use in callbacks
   const isMicActiveRef = useRef(false);
   const isMutedRef = useRef(false);
   const isProcessingRef = useRef(false);
-  const vadRunningRef = useRef(false);
-  
+
   // Messages ref for use in callbacks
   const messagesRef = useRef<Message[]>([]);
   const conversationStageRef = useRef<ConversationStage>('intro');
   const currentScenarioRef = useRef<Scenario | null>(null);
 
+  // Accumulated transcript for endpoint detection
+  const accumulatedTranscriptRef = useRef('');
+  const endpointTimerRef = useRef<NodeJS.Timeout | null>(null);
+
   // Sync state to refs
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
-  
+
   useEffect(() => {
     conversationStageRef.current = conversationStage;
   }, [conversationStage]);
-  
+
   useEffect(() => {
     currentScenarioRef.current = currentScenario;
   }, [currentScenario]);
+
+  // Initialize Soniox client
+  const initializeSoniox = useCallback(async () => {
+    console.log('Initializing Soniox WebSocket client...');
+
+    try {
+      const client = new SonioxClient({
+        apiKey: async () => {
+          const response = await fetch('/api/soniox-key');
+          if (!response.ok) {
+            throw new Error('Failed to fetch Soniox API key');
+          }
+          const data = await response.json();
+          return data.apiKey;
+        },
+        onStarted: () => {
+          console.log('Soniox transcription started');
+          setVoiceStatus('listening');
+        },
+        onFinished: () => {
+          console.log('Soniox transcription finished');
+        },
+        onError: (error) => {
+          console.error('Soniox error:', error);
+          // Try to recover by restarting if mic is still active
+          if (isMicActiveRef.current && !isProcessingRef.current) {
+            setTimeout(() => {
+              if (sonioxClientRef.current && isMicActiveRef.current) {
+                startSonioxTranscription();
+              }
+            }, 1000);
+          }
+        },
+        onStateChange: (state) => {
+          console.log('Soniox state changed:', state);
+        },
+      });
+
+      sonioxClientRef.current = client;
+      console.log('Soniox client initialized');
+      return client;
+    } catch (error) {
+      console.error('Failed to initialize Soniox client:', error);
+      throw error;
+    }
+  }, []);
+
+  // Start Soniox transcription
+  const startSonioxTranscription = useCallback(() => {
+    if (!sonioxClientRef.current) {
+      console.error('Soniox client not initialized');
+      return;
+    }
+
+    if (isMutedRef.current || isProcessingRef.current) {
+      console.log('Skipping Soniox start - muted:', isMutedRef.current, 'processing:', isProcessingRef.current);
+      return;
+    }
+
+    console.log('Starting Soniox transcription...');
+    accumulatedTranscriptRef.current = '';
+    setPartialTranscript('');
+
+    sonioxClientRef.current.start({
+      model: 'stt-rt-preview',
+      languageHints: ['ur', 'en'], // Urdu and English hints
+      enableEndpointDetection: true, // Detect when user stops speaking
+      onPartialResult: (result) => {
+        // Process tokens to get transcript
+        if (result.tokens && result.tokens.length > 0) {
+          // Build transcript from tokens
+          const finalTokens = result.tokens.filter(t => t.is_final);
+          const partialTokens = result.tokens.filter(t => !t.is_final);
+
+          // Update accumulated transcript with final tokens
+          const finalText = finalTokens.map(t => t.text).join('');
+          const partialText = partialTokens.map(t => t.text).join('');
+
+          if (finalText) {
+            accumulatedTranscriptRef.current += finalText;
+          }
+
+          // Display current transcript (accumulated + partial)
+          const displayText = accumulatedTranscriptRef.current + partialText;
+          setPartialTranscript(displayText);
+
+          // Check for endpoint (user stopped speaking)
+          const hasEndpoint = result.tokens.some(t => t.is_final && t.text === '');
+
+          // Reset endpoint timer on new speech
+          if (endpointTimerRef.current) {
+            clearTimeout(endpointTimerRef.current);
+            endpointTimerRef.current = null;
+          }
+
+          // If we have final tokens, start a silence timer
+          if (finalTokens.length > 0 && accumulatedTranscriptRef.current.trim().length > 0) {
+            endpointTimerRef.current = setTimeout(() => {
+              // If we have accumulated transcript and no new speech, process it
+              if (accumulatedTranscriptRef.current.trim().length > 0 && !isProcessingRef.current) {
+                const transcript = accumulatedTranscriptRef.current.trim();
+                console.log('Endpoint detected, processing transcript:', transcript);
+                handleTranscriptComplete(transcript);
+              }
+            }, 1500); // 1.5 second silence threshold
+          }
+        }
+      },
+    });
+
+    setVoiceStatus('listening');
+  }, []);
+
+  // Handle completed transcript
+  const handleTranscriptComplete = async (transcript: string) => {
+    if (!transcript || transcript.trim().length === 0) {
+      console.log('Empty transcript, ignoring');
+      return;
+    }
+
+    console.log('Processing complete transcript:', transcript);
+
+    // Stop current transcription
+    if (sonioxClientRef.current) {
+      try {
+        sonioxClientRef.current.cancel();
+      } catch (e) {
+        console.log('Error canceling Soniox:', e);
+      }
+    }
+
+    isProcessingRef.current = true;
+    setIsProcessing(true);
+    setVoiceStatus('processing');
+    setPartialTranscript('');
+    accumulatedTranscriptRef.current = '';
+
+    try {
+      // Get romanized version
+      const romanized = await getRomanizedUrdu(transcript);
+
+      // Add user message
+      const userMsg: Message = {
+        role: 'user',
+        content: transcript,
+        contentRoman: romanized,
+        timestamp: new Date()
+      };
+
+      setMessages(prev => {
+        const newMessages = [...prev, userMsg];
+        messagesRef.current = newMessages;
+        return newMessages;
+      });
+
+      // Handle based on conversation stage
+      const stage = conversationStageRef.current;
+      console.log('Current stage:', stage);
+
+      if (stage === 'intro') {
+        await handleIntroResponse(transcript);
+      } else if (stage === 'scenario-announcement') {
+        await handleScenarioResponse(transcript);
+      } else {
+        await handleRoleplayResponse(transcript);
+      }
+
+    } catch (error) {
+      console.error('Processing error:', error);
+      setVoiceStatus('listening');
+      // Restart transcription
+      if (isMicActiveRef.current && !isMutedRef.current) {
+        startSonioxTranscription();
+      }
+    } finally {
+      isProcessingRef.current = false;
+      setIsProcessing(false);
+    }
+  };
 
   // Start session
   const startSession = async () => {
@@ -77,12 +256,15 @@ export default function ConversationPage() {
     setIsConnected(true);
     setSessionStartTime(new Date());
     setConversationStage('intro');
-    
+
     // Select random scenario
     const scenario = getRandomScenario();
     setCurrentScenario(scenario);
     currentScenarioRef.current = scenario;
-    
+
+    // Initialize Soniox client
+    await initializeSoniox();
+
     // UMAR introduces itself
     const introMsg: Message = {
       role: 'assistant',
@@ -90,282 +272,33 @@ export default function ConversationPage() {
       contentRoman: 'Assalam-o-Alaikum! Main UMAR hoon, aap ka AI training assistant. Main mukhtalif customers ka kirdar ada karunga taake aap apni maharat behtar bana sakein. Kya aap tayyar hain?',
       timestamp: new Date()
     };
-    
+
     setMessages([introMsg]);
     messagesRef.current = [introMsg];
-    
+
     await speakText(introMsg.content);
-    
-    // Start continuous listening AFTER TTS finishes
-    await startContinuousListening();
-  };
 
-  // Start continuous listening with VAD
-  const startContinuousListening = async () => {
-    console.log('Requesting microphone access...');
-    
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        } 
-      });
-      
-      console.log('Microphone access granted!');
-      streamRef.current = stream;
+    // Start continuous listening with Soniox AFTER TTS finishes
+    isMicActiveRef.current = true;
+    isMutedRef.current = false;
+    isProcessingRef.current = false;
+    setIsMicActive(true);
 
-      // Verify microphone stream is active
-      const audioTracks = stream.getAudioTracks();
-      if (audioTracks.length === 0) {
-        console.error('No audio tracks found in stream');
-        alert('No audio tracks found. Please check your microphone.');
-        return;
-      }
-      console.log('Audio track:', audioTracks[0].label, 'enabled:', audioTracks[0].enabled, 'muted:', audioTracks[0].muted);
-      
-      // Set up audio context for voice detection
-      audioContextRef.current = new AudioContext();
-
-      // CRITICAL: Resume AudioContext - required by modern browsers
-      // AudioContext starts in "suspended" state and must be resumed after user interaction
-      if (audioContextRef.current.state === 'suspended') {
-        console.log('AudioContext is suspended, resuming...');
-        await audioContextRef.current.resume();
-        console.log('AudioContext resumed, state:', audioContextRef.current.state);
-      }
-
-      const source = audioContextRef.current.createMediaStreamSource(stream);
-      analyserRef.current = audioContextRef.current.createAnalyser();
-      analyserRef.current.fftSize = 2048;
-      analyserRef.current.smoothingTimeConstant = 0.8;
-      source.connect(analyserRef.current);
-      
-      // Set up media recorder
-      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') 
-        ? 'audio/webm;codecs=opus' 
-        : 'audio/webm';
-      
-      const mediaRecorder = new MediaRecorder(stream, { mimeType });
-      mediaRecorderRef.current = mediaRecorder;
-      
-      mediaRecorder.ondataavailable = (event) => {
-        console.log('Data available:', event.data.size, 'bytes, isRecording:', isRecordingRef.current);
-        if (event.data.size > 0 && isRecordingRef.current) {
-          audioChunksRef.current.push(event.data);
-        }
-      };
-      
-      mediaRecorder.onstop = async () => {
-        console.log('MediaRecorder stopped, chunks:', audioChunksRef.current.length);
-        if (audioChunksRef.current.length > 0) {
-          await processRecording();
-        }
-      };
-      
-      // CRITICAL: Set refs BEFORE starting VAD
-      isMicActiveRef.current = true;
-      isMutedRef.current = false;
-      isProcessingRef.current = false;
-      
-      // Then update state for UI
-      setIsMicActive(true);
-      setVoiceStatus('listening');
-      
-      console.log('Starting voice activity detection...');
-      console.log('Ref values - isMicActive:', isMicActiveRef.current, 'isMuted:', isMutedRef.current);
-      
-      // Start voice activity detection
-      detectVoiceActivity();
-      
-    } catch (error) {
-      console.error('Microphone access error:', error);
-      alert('Could not access microphone. Please allow microphone access and try again.');
-    }
-  };
-
-  // Voice Activity Detection
-  const detectVoiceActivity = () => {
-    if (!analyserRef.current || !mediaRecorderRef.current) {
-      console.log('VAD: Missing analyser or mediaRecorder');
-      return;
-    }
-    
-    if (vadRunningRef.current) {
-      console.log('VAD already running');
-      return;
-    }
-    
-    vadRunningRef.current = true;
-    
-    const bufferLength = analyserRef.current.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
-
-    let frameCount = 0;
-    let initialLogCount = 0; // Log more frequently at start for debugging
-
-    const checkAudio = () => {
-      // Use REFS not state - this is critical!
-      if (!isMicActiveRef.current) {
-        console.log('Mic not active, stopping VAD');
-        vadRunningRef.current = false;
-        return;
-      }
-      
-      if (isMutedRef.current || isProcessingRef.current) {
-        requestAnimationFrame(checkAudio);
-        return;
-      }
-      
-      if (!analyserRef.current) {
-        requestAnimationFrame(checkAudio);
-        return;
-      }
-      
-      analyserRef.current.getByteTimeDomainData(dataArray);
-      
-      // Calculate volume level (RMS)
-      let sum = 0;
-      for (let i = 0; i < bufferLength; i++) {
-        const value = (dataArray[i] - 128) / 128;
-        sum += value * value;
-      }
-      const volume = Math.sqrt(sum / bufferLength);
-
-      // Voice detected threshold - adjust if needed (lower = more sensitive)
-      const VOICE_THRESHOLD = 0.01;
-
-      // Log for debugging - more frequent at start, then every ~1 second
-      frameCount++;
-      const shouldLog = (initialLogCount < 5 && frameCount % 15 === 0) || frameCount % 60 === 0;
-      if (shouldLog) {
-        console.log('VAD - Volume:', volume.toFixed(4), 'Recording:', isRecordingRef.current, 'Threshold:', VOICE_THRESHOLD);
-        if (initialLogCount < 5 && frameCount % 15 === 0) initialLogCount++;
-      }
-      
-      if (volume > VOICE_THRESHOLD) {
-        // Clear silence timer
-        if (silenceTimerRef.current) {
-          clearTimeout(silenceTimerRef.current);
-          silenceTimerRef.current = null;
-        }
-        
-        // Start recording if not already
-        if (!isRecordingRef.current && mediaRecorderRef.current?.state === 'inactive') {
-          console.log('Voice detected! Starting recording...');
-          audioChunksRef.current = [];
-          mediaRecorderRef.current.start(100); // Collect data every 100ms
-          isRecordingRef.current = true;
-          setVoiceStatus('speaking');
-        }
-      } else {
-        // Silence detected
-        if (isRecordingRef.current) {
-          // Start silence timer (1.5 seconds)
-          if (!silenceTimerRef.current) {
-            silenceTimerRef.current = setTimeout(() => {
-              console.log('Silence timeout - stopping recording');
-              if (mediaRecorderRef.current?.state === 'recording') {
-                mediaRecorderRef.current.stop();
-                isRecordingRef.current = false;
-                setVoiceStatus('processing');
-              }
-              silenceTimerRef.current = null;
-            }, 1500);
-          }
-        }
-      }
-      
-      requestAnimationFrame(checkAudio);
-    };
-    
-    checkAudio();
-  };
-
-  // Process recorded audio
-  const processRecording = async () => {
-    if (audioChunksRef.current.length === 0) {
-      console.log('No audio chunks to process');
-      setVoiceStatus('listening');
-      return;
-    }
-    
-    console.log('Processing recording with', audioChunksRef.current.length, 'chunks');
-    
-    isProcessingRef.current = true;
-    setIsProcessing(true);
-    setVoiceStatus('processing');
-    
-    try {
-      const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-      audioChunksRef.current = [];
-      
-      console.log('Audio blob size:', audioBlob.size, 'bytes');
-      
-      // Transcribe
-      const transcription = await transcribeAudio(audioBlob);
-      
-      console.log('Transcription result:', transcription);
-      
-      if (!transcription || transcription.trim().length === 0) {
-        console.log('Empty transcription, resuming listening');
-        setVoiceStatus('listening');
-        isProcessingRef.current = false;
-        setIsProcessing(false);
-        return;
-      }
-      
-      // Get romanized version
-      const romanized = await getRomanizedUrdu(transcription);
-      
-      // Add user message
-      const userMsg: Message = {
-        role: 'user',
-        content: transcription,
-        contentRoman: romanized,
-        timestamp: new Date()
-      };
-      
-      setMessages(prev => {
-        const newMessages = [...prev, userMsg];
-        messagesRef.current = newMessages;
-        return newMessages;
-      });
-      
-      // Handle based on conversation stage
-      const stage = conversationStageRef.current;
-      console.log('Current stage:', stage);
-      
-      if (stage === 'intro') {
-        await handleIntroResponse(transcription);
-      } else if (stage === 'scenario-announcement') {
-        await handleScenarioResponse(transcription);
-      } else {
-        await handleRoleplayResponse(transcription);
-      }
-      
-    } catch (error) {
-      console.error('Processing error:', error);
-      setVoiceStatus('listening');
-    } finally {
-      isProcessingRef.current = false;
-      setIsProcessing(false);
-    }
+    startSonioxTranscription();
   };
 
   // Handle intro stage response
   const handleIntroResponse = async (userText: string) => {
     const lowerText = userText.toLowerCase();
-    
+
     // Check if user said yes/ready
-    if (lowerText.includes('yes') || lowerText.includes('ہاں') || lowerText.includes('han') || 
+    if (lowerText.includes('yes') || lowerText.includes('ہاں') || lowerText.includes('han') ||
         lowerText.includes('تیار') || lowerText.includes('tayyar') || lowerText.includes('ready') ||
         lowerText.includes('haan') || lowerText.includes('ji') || lowerText.includes('جی')) {
-      
+
       setConversationStage('scenario-announcement');
       conversationStageRef.current = 'scenario-announcement';
-      
+
       const scenario = currentScenarioRef.current;
       const scenarioMsg: Message = {
         role: 'assistant',
@@ -373,20 +306,20 @@ export default function ConversationPage() {
         contentRoman: `Bohat acha! Main ab ${scenario?.name} ka kirdar ada karunga. ${scenario?.description}. Aiye shuru karein.`,
         timestamp: new Date()
       };
-      
+
       setMessages(prev => {
         const newMessages = [...prev, scenarioMsg];
         messagesRef.current = newMessages;
         return newMessages;
       });
-      
+
       await speakText(scenarioMsg.content);
-      
+
       // Automatically move to roleplay after announcement
       setTimeout(() => {
         startRoleplay();
       }, 2000);
-      
+
     } else {
       const clarifyMsg: Message = {
         role: 'assistant',
@@ -394,15 +327,19 @@ export default function ConversationPage() {
         contentRoman: 'Koi baat nahin. Jab aap tayyar hon to "haan" ya "tayyar hoon" kahein.',
         timestamp: new Date()
       };
-      
+
       setMessages(prev => {
         const newMessages = [...prev, clarifyMsg];
         messagesRef.current = newMessages;
         return newMessages;
       });
-      
+
       await speakText(clarifyMsg.content);
-      setVoiceStatus('listening');
+
+      // Restart listening
+      if (isMicActiveRef.current && !isMutedRef.current) {
+        startSonioxTranscription();
+      }
     }
   };
 
@@ -416,34 +353,38 @@ export default function ConversationPage() {
   const startRoleplay = async () => {
     setConversationStage('roleplay');
     conversationStageRef.current = 'roleplay';
-    
+
     // Get first customer message from scenario
     const firstMsg = await getAIResponse('', true);
-    
+
     const aiMsg: Message = {
       role: 'assistant',
       content: firstMsg.text,
       contentRoman: firstMsg.roman,
       timestamp: new Date()
     };
-    
+
     setMessages(prev => {
       const newMessages = [...prev, aiMsg];
       messagesRef.current = newMessages;
       return newMessages;
     });
-    
+
     await speakText(aiMsg.content);
-    setVoiceStatus('listening');
+
+    // Restart listening
+    if (isMicActiveRef.current && !isMutedRef.current) {
+      startSonioxTranscription();
+    }
   };
 
   // Handle roleplay response
   const handleRoleplayResponse = async (userText: string) => {
     setVoiceStatus('ai-responding');
-    
+
     // Get AI response
     const aiResponse = await getAIResponse(userText, false);
-    
+
     // Check if call should end naturally
     if (aiResponse.shouldEnd) {
       const endMsg: Message = {
@@ -452,37 +393,41 @@ export default function ConversationPage() {
         contentRoman: aiResponse.roman,
         timestamp: new Date()
       };
-      
+
       setMessages(prev => {
         const newMessages = [...prev, endMsg];
         messagesRef.current = newMessages;
         return newMessages;
       });
-      
+
       await speakText(endMsg.content);
-      
+
       // End call and go to evaluation
       setTimeout(() => {
         endSession(true);
       }, 2000);
       return;
     }
-    
+
     const aiMsg: Message = {
       role: 'assistant',
       content: aiResponse.text,
       contentRoman: aiResponse.roman,
       timestamp: new Date()
     };
-    
+
     setMessages(prev => {
       const newMessages = [...prev, aiMsg];
       messagesRef.current = newMessages;
       return newMessages;
     });
-    
+
     await speakText(aiMsg.content);
-    setVoiceStatus('listening');
+
+    // Restart listening
+    if (isMicActiveRef.current && !isMutedRef.current) {
+      startSonioxTranscription();
+    }
   };
 
   // Get AI response
@@ -499,9 +444,9 @@ export default function ConversationPage() {
           conversationHistory: messagesRef.current
         }),
       });
-      
+
       if (!response.ok) throw new Error('Chat failed');
-      
+
       const data = await response.json();
       return {
         text: data.response,
@@ -518,34 +463,6 @@ export default function ConversationPage() {
     }
   };
 
-  // Transcribe audio
-  const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
-    try {
-      const base64Audio = await blobToBase64(audioBlob);
-      
-      const response = await fetch('/api/voice', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'transcribe',
-          audio: base64Audio
-        }),
-      });
-      
-      if (!response.ok) {
-        const errorData = await response.json();
-        console.error('Transcription API error:', errorData);
-        throw new Error('Transcription failed');
-      }
-      
-      const data = await response.json();
-      return data.text;
-    } catch (error) {
-      console.error('Transcription error:', error);
-      throw error;
-    }
-  };
-
   // Get romanized Urdu
   const getRomanizedUrdu = async (urduText: string): Promise<string> => {
     try {
@@ -557,9 +474,9 @@ export default function ConversationPage() {
           text: urduText
         }),
       });
-      
+
       if (!response.ok) throw new Error('Romanization failed');
-      
+
       const data = await response.json();
       return data.roman;
     } catch (error) {
@@ -570,16 +487,21 @@ export default function ConversationPage() {
 
   // Speak text using TTS
   const speakText = async (text: string) => {
-    if (isMutedRef.current) {
-      console.log('TTS skipped - muted');
-      return;
+    // Cancel any ongoing Soniox transcription while speaking
+    if (sonioxClientRef.current) {
+      try {
+        sonioxClientRef.current.cancel();
+      } catch (e) {
+        console.log('Error canceling Soniox for TTS:', e);
+      }
     }
 
-    try {
-      // Mute microphone while AI is speaking to prevent feedback
-      isMutedRef.current = true;
-      setIsMuted(true);
+    // Mute microphone while AI is speaking to prevent feedback
+    isMutedRef.current = true;
+    setIsMuted(true);
+    setVoiceStatus('ai-responding');
 
+    try {
       console.log('Calling TTS API for:', text.substring(0, 50) + '...');
 
       const response = await fetch('/api/voice', {
@@ -596,7 +518,7 @@ export default function ConversationPage() {
         console.error('TTS API error:', response.status, errorData);
         throw new Error(`TTS failed: ${response.status}`);
       }
-      
+
       const data = await response.json();
 
       if (!data.audio) {
@@ -653,46 +575,54 @@ export default function ConversationPage() {
     const newMuted = !isMuted;
     isMutedRef.current = newMuted;
     setIsMuted(newMuted);
+
+    if (newMuted) {
+      // Stop Soniox when muting
+      if (sonioxClientRef.current) {
+        try {
+          sonioxClientRef.current.cancel();
+        } catch (e) {
+          console.log('Error canceling Soniox on mute:', e);
+        }
+      }
+      setPartialTranscript('');
+      accumulatedTranscriptRef.current = '';
+    } else {
+      // Restart Soniox when unmuting
+      if (isMicActiveRef.current && !isProcessingRef.current) {
+        startSonioxTranscription();
+      }
+    }
   };
 
   // End session
   const endSession = (natural: boolean = false) => {
     console.log('Ending session, natural:', natural);
-    
-    // Stop VAD
+
+    // Stop Soniox
     isMicActiveRef.current = false;
-    vadRunningRef.current = false;
-    
-    // Stop all recording
-    if (mediaRecorderRef.current) {
-      if (mediaRecorderRef.current.state === 'recording') {
-        mediaRecorderRef.current.stop();
+    if (sonioxClientRef.current) {
+      try {
+        sonioxClientRef.current.cancel();
+      } catch (e) {
+        console.log('Error canceling Soniox on end:', e);
       }
+      sonioxClientRef.current = null;
     }
-    
-    // Stop media stream
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-    }
-    
-    // Close audio context
-    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-      audioContextRef.current.close();
-    }
-    
+
     // Clear timers
-    if (silenceTimerRef.current) {
-      clearTimeout(silenceTimerRef.current);
+    if (endpointTimerRef.current) {
+      clearTimeout(endpointTimerRef.current);
     }
-    
+
     setIsMicActive(false);
     setIsConnected(false);
-    
+
     // Navigate to evaluation page with conversation data
-    const duration = sessionStartTime 
+    const duration = sessionStartTime
       ? Math.floor((new Date().getTime() - sessionStartTime.getTime()) / 1000)
       : 0;
-    
+
     // Store conversation data in sessionStorage
     sessionStorage.setItem('umar_conversation', JSON.stringify({
       messages: messagesRef.current,
@@ -700,21 +630,8 @@ export default function ConversationPage() {
       duration,
       endedNaturally: natural
     }));
-    
-    router.push('/evaluation');
-  };
 
-  // Convert blob to base64
-  const blobToBase64 = (blob: Blob): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const base64 = (reader.result as string).split(',')[1];
-        resolve(base64);
-      };
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
+    router.push('/evaluation');
   };
 
   // Get status display
@@ -737,16 +654,17 @@ export default function ConversationPage() {
   useEffect(() => {
     return () => {
       isMicActiveRef.current = false;
-      vadRunningRef.current = false;
-      
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
+
+      if (sonioxClientRef.current) {
+        try {
+          sonioxClientRef.current.cancel();
+        } catch (e) {
+          console.log('Cleanup: Error canceling Soniox:', e);
+        }
       }
-      if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-        audioContextRef.current.close();
-      }
-      if (silenceTimerRef.current) {
-        clearTimeout(silenceTimerRef.current);
+
+      if (endpointTimerRef.current) {
+        clearTimeout(endpointTimerRef.current);
       }
     };
   }, []);
@@ -756,7 +674,7 @@ export default function ConversationPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
       <audio ref={audioRef} className="hidden" />
-      
+
       {/* Header */}
       <header className="bg-white shadow-sm">
         <div className="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8">
@@ -821,7 +739,7 @@ export default function ConversationPage() {
                   </button>
                 </div>
               </div>
-              
+
               {/* Status Bar */}
               <div className="mb-4 bg-gray-50 rounded-lg p-3 text-center">
                 <p className="text-sm font-medium text-gray-700">
@@ -829,7 +747,15 @@ export default function ConversationPage() {
                   {statusDisplay.text}
                 </p>
               </div>
-              
+
+              {/* Real-time Transcription Preview */}
+              {partialTranscript && (
+                <div className="mb-4 bg-indigo-50 border border-indigo-200 rounded-lg p-3">
+                  <p className="text-sm text-indigo-600 font-medium mb-1">Real-time transcription:</p>
+                  <p className="text-indigo-900" dir="auto">{partialTranscript}</p>
+                </div>
+              )}
+
               {/* Messages */}
               <div className="space-y-4 mb-6 max-h-[400px] overflow-y-auto">
                 {messages.map((msg, idx) => (
@@ -847,7 +773,7 @@ export default function ConversationPage() {
                       <p className="text-sm font-semibold mb-1">
                         {msg.role === 'user' ? 'You (Agent)' : 'Customer (AI)'}
                       </p>
-                      
+
                       {urduDisplayMode === 'both' && (
                         <>
                           <p dir="rtl" className="mb-1">{msg.content}</p>
@@ -856,15 +782,15 @@ export default function ConversationPage() {
                           )}
                         </>
                       )}
-                      
+
                       {urduDisplayMode === 'arabic' && (
                         <p dir="rtl">{msg.content}</p>
                       )}
-                      
+
                       {urduDisplayMode === 'roman' && msg.contentRoman && (
                         <p>{msg.contentRoman}</p>
                       )}
-                      
+
                       <p className="text-xs opacity-70 mt-1">
                         {msg.timestamp.toLocaleTimeString()}
                       </p>
@@ -877,12 +803,12 @@ export default function ConversationPage() {
             {/* Controls Panel */}
             <div className="bg-white rounded-2xl shadow-xl p-6">
               <h3 className="text-xl font-bold text-gray-900 mb-6">Voice Controls</h3>
-              
+
               <div className="flex flex-col items-center gap-6">
                 {/* Status Indicator */}
                 <div className={`w-32 h-32 rounded-full flex items-center justify-center ${
-                  voiceStatus === 'speaking' ? 'bg-blue-100 animate-pulse' : 
-                  voiceStatus === 'listening' ? 'bg-green-100' : 
+                  voiceStatus === 'speaking' ? 'bg-blue-100 animate-pulse' :
+                  voiceStatus === 'listening' ? 'bg-green-100' :
                   voiceStatus === 'processing' ? 'bg-yellow-100 animate-pulse' :
                   voiceStatus === 'ai-responding' ? 'bg-purple-100 animate-pulse' :
                   'bg-gray-100'
@@ -899,7 +825,7 @@ export default function ConversationPage() {
                     <MicOff className="w-16 h-16 text-gray-400" />
                   )}
                 </div>
-                
+
                 {/* Mute Button */}
                 <button
                   onClick={toggleMute}
@@ -922,7 +848,7 @@ export default function ConversationPage() {
                     </>
                   )}
                 </button>
-                
+
                 {/* Tips */}
                 <div className="mt-8 pt-6 border-t border-gray-200 w-full">
                   <h4 className="font-semibold text-gray-900 mb-3">Tips:</h4>
@@ -945,18 +871,18 @@ export default function ConversationPage() {
 // Session Timer Component
 function SessionTimer({ startTime }: { startTime: Date }) {
   const [elapsed, setElapsed] = useState(0);
-  
+
   useEffect(() => {
     const interval = setInterval(() => {
       setElapsed(Math.floor((new Date().getTime() - startTime.getTime()) / 1000));
     }, 1000);
-    
+
     return () => clearInterval(interval);
   }, [startTime]);
-  
+
   const minutes = Math.floor(elapsed / 60);
   const seconds = elapsed % 60;
-  
+
   return (
     <p className="text-lg font-semibold text-indigo-900">
       {minutes}:{seconds.toString().padStart(2, '0')}
