@@ -436,6 +436,15 @@ export default function ConversationPage() {
   // Get AI response
   const getAIResponse = async (userText: string, isFirst: boolean): Promise<{ text: string; roman: string; shouldEnd: boolean }> => {
     try {
+      const scenario = currentScenarioRef.current;
+
+      if (!scenario) {
+        console.error('AI response error: No scenario available');
+        throw new Error('No scenario available');
+      }
+
+      console.log('getAIResponse called:', { isFirst, userText: userText.substring(0, 50), scenarioId: scenario.id });
+
       const response = await fetch('/api/voice', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -443,14 +452,31 @@ export default function ConversationPage() {
           action: 'chat',
           text: userText,
           isFirst: isFirst,
-          scenario: currentScenarioRef.current,
-          conversationHistory: messagesRef.current
+          scenario: scenario,
+          conversationHistory: messagesRef.current.map(m => ({
+            role: m.role,
+            content: m.content,
+            contentRoman: m.contentRoman,
+            timestamp: m.timestamp.toISOString ? m.timestamp.toISOString() : m.timestamp
+          }))
         }),
       });
 
-      if (!response.ok) throw new Error('Chat failed');
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        console.error('Chat API error:', response.status, errorData);
+        throw new Error(`Chat failed: ${response.status}`);
+      }
 
       const data = await response.json();
+
+      if (!data.response) {
+        console.error('Invalid chat response:', data);
+        throw new Error('Invalid response from chat API');
+      }
+
+      console.log('AI response received:', data.response.substring(0, 50));
+
       return {
         text: data.response,
         roman: data.roman || '',

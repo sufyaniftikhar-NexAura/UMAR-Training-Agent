@@ -65,6 +65,15 @@ export async function POST(request: NextRequest) {
     // ===== CHAT ACTION =====
     if (action === 'chat') {
       try {
+        // Validate scenario
+        if (!scenario || !scenario.systemPrompt) {
+          console.error('Chat error: Invalid or missing scenario', { scenario });
+          return NextResponse.json(
+            { error: 'Invalid scenario' },
+            { status: 400 }
+          );
+        }
+
         const messages: Message[] = conversationHistory || [];
 
         // Build conversation history for context
@@ -74,6 +83,8 @@ export async function POST(request: NextRequest) {
 
         // Count exchanges to track conversation progress
         const exchangeCount = messages.filter(m => m.role === 'user').length;
+
+        console.log('Chat request:', { isFirst, exchangeCount, historyLength: historyText.length });
 
         let systemPrompt = '';
         let userPrompt = '';
@@ -184,10 +195,18 @@ Reply naturally (1-2 sentences). If it's time to end, include [END_CALL] at the 
         });
 
         if (!response.ok) {
-          throw new Error('Chat completion failed');
+          const errorText = await response.text();
+          console.error('OpenAI Chat API error:', response.status, errorText);
+          throw new Error(`Chat completion failed: ${response.status}`);
         }
 
         const data = await response.json();
+
+        if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+          console.error('Invalid OpenAI response:', data);
+          throw new Error('Invalid response from OpenAI');
+        }
+
         let aiResponse = data.choices[0].message.content.trim();
 
         // Check if AI wants to end the call

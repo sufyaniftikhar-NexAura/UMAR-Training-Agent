@@ -59,37 +59,77 @@ export default function EvaluationPage() {
     try {
       // Load conversation data from sessionStorage
       const storedData = sessionStorage.getItem('umar_conversation');
-      
+
       if (!storedData) {
         setError('No conversation data found. Please complete a training session first.');
         setIsLoading(false);
         return;
       }
 
-      const data: ConversationData = JSON.parse(storedData);
-      setConversationData(data);
-
-      // Generate evaluation
-      const apiKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY;
-      
-      if (!apiKey) {
-        setError('API key not configured');
+      let data: ConversationData;
+      try {
+        data = JSON.parse(storedData);
+      } catch (parseError) {
+        console.error('Failed to parse conversation data:', parseError);
+        setError('Invalid conversation data. Please try a new session.');
         setIsLoading(false);
         return;
       }
 
+      // Validate conversation data
+      if (!data.messages || data.messages.length === 0) {
+        setError('No messages found in conversation. Please complete a training session first.');
+        setIsLoading(false);
+        return;
+      }
+
+      if (!data.scenario) {
+        setError('No scenario data found. Please complete a training session first.');
+        setIsLoading(false);
+        return;
+      }
+
+      console.log('Loaded conversation data:', {
+        messageCount: data.messages.length,
+        scenario: data.scenario?.name,
+        duration: data.duration
+      });
+
+      setConversationData(data);
+
+      // Generate evaluation using API route instead of client-side call
+      const apiKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY;
+
+      if (!apiKey) {
+        console.error('OpenAI API key not found in environment');
+        setError('API key not configured. Please check your environment settings.');
+        setIsLoading(false);
+        return;
+      }
+
+      // Convert messages to proper format (handle Date serialization)
+      const formattedMessages = data.messages.map(m => ({
+        role: m.role,
+        content: m.content,
+        timestamp: typeof m.timestamp === 'string' ? new Date(m.timestamp) : m.timestamp
+      }));
+
+      console.log('Generating evaluation...');
+
       const result = await generateEvaluation({
-        conversation: data.messages,
+        conversation: formattedMessages,
         scenario: data.scenario,
         duration: data.duration,
         apiKey: apiKey,
       });
 
+      console.log('Evaluation generated:', { overallScore: result.overallScore });
+
       setEvaluation(result);
       setIsLoading(false);
     } catch (err) {
       console.error('Evaluation error:', err);
-      setError('Failed to generate evaluation. Please try again.');
+      setError(`Failed to generate evaluation: ${err instanceof Error ? err.message : 'Unknown error'}. Please try again.`);
       setIsLoading(false);
     }
   };
