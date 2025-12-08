@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { Scenario } from '@/lib/scenarios';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -10,7 +9,7 @@ interface Message {
 
 export async function POST(request: NextRequest) {
   try {
-    const { action, audio, text, isFirst, scenario, conversationHistory } = await request.json();
+    const { action, text, isFirst, scenario, conversationHistory } = await request.json();
 
     const openaiApiKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY;
     const elevenlabsApiKey = process.env.ELEVENLABS_API_KEY;
@@ -23,49 +22,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ===== TRANSCRIBE ACTION (OpenAI Whisper) =====
-    // Using OpenAI Whisper for reliable speech-to-text
-    // Supports Urdu and many other languages
-    if (action === 'transcribe' && audio) {
-      try {
-        const audioBuffer = Buffer.from(audio, 'base64');
-
-        // Create form data for OpenAI Whisper API
-        const formData = new FormData();
-        const audioBlob = new Blob([audioBuffer], { type: 'audio/webm' });
-        formData.append('file', audioBlob, 'audio.webm');
-        formData.append('model', 'whisper-1');
-        formData.append('language', 'ur'); // Urdu language hint
-
-        console.log('Sending audio to Whisper API, size:', audioBuffer.length, 'bytes');
-
-        const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${openaiApiKey}`,
-          },
-          body: formData,
-        });
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          console.error('Whisper API error:', response.status, errorText);
-          throw new Error(`Transcription failed: ${response.status}`);
-        }
-
-        const data = await response.json();
-        console.log('Whisper transcription result:', data.text);
-
-        return NextResponse.json({ text: data.text || '' });
-      } catch (error) {
-        console.error('Transcription error:', error);
-        return NextResponse.json(
-          { error: 'Transcription failed' },
-          { status: 500 }
-        );
-      }
-    }
-    
     // ===== ROMANIZE ACTION =====
     if (action === 'romanize' && text) {
       try {
@@ -91,21 +47,21 @@ export async function POST(request: NextRequest) {
             max_tokens: 200,
           }),
         });
-        
+
         if (!response.ok) {
           throw new Error('Romanization failed');
         }
-        
+
         const data = await response.json();
         const roman = data.choices[0].message.content.trim();
-        
+
         return NextResponse.json({ roman });
       } catch (error) {
         console.error('Romanization error:', error);
         return NextResponse.json({ roman: '' });
       }
     }
-    
+
     // ===== CHAT ACTION =====
     if (action === 'chat') {
       try {
@@ -203,7 +159,7 @@ IMPORTANT:
 
 Reply naturally (1-2 sentences). If it's time to end, include [END_CALL] at the end.`;
         }
-        
+
         const response = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
           headers: {
@@ -226,18 +182,18 @@ Reply naturally (1-2 sentences). If it's time to end, include [END_CALL] at the 
             max_tokens: 100, // Reduced to encourage shorter, natural responses
           }),
         });
-        
+
         if (!response.ok) {
           throw new Error('Chat completion failed');
         }
-        
+
         const data = await response.json();
         let aiResponse = data.choices[0].message.content.trim();
-        
+
         // Check if AI wants to end the call
         const shouldEnd = aiResponse.includes('[END_CALL]');
         aiResponse = aiResponse.replace('[END_CALL]', '').trim();
-        
+
         // Get romanized version
         const romanResponse = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
@@ -261,14 +217,14 @@ Reply naturally (1-2 sentences). If it's time to end, include [END_CALL] at the 
             max_tokens: 200,
           }),
         });
-        
+
         let roman = '';
         if (romanResponse.ok) {
           const romanData = await romanResponse.json();
           roman = romanData.choices[0].message.content.trim();
         }
-        
-        return NextResponse.json({ 
+
+        return NextResponse.json({
           response: aiResponse,
           roman: roman,
           shouldEnd: shouldEnd
@@ -281,7 +237,7 @@ Reply naturally (1-2 sentences). If it's time to end, include [END_CALL] at the 
         );
       }
     }
-    
+
     // ===== SPEAK ACTION (ElevenLabs) =====
     // Configured for Urdu (Arabic script) text-to-speech
     // Input text MUST be in Arabic Urdu script for proper pronunciation
@@ -344,12 +300,12 @@ Reply naturally (1-2 sentences). If it's time to end, include [END_CALL] at the 
         );
       }
     }
-    
+
     return NextResponse.json(
       { error: 'Invalid action' },
       { status: 400 }
     );
-    
+
   } catch (error) {
     console.error('API Error:', error);
     return NextResponse.json(
@@ -364,18 +320,23 @@ export async function GET() {
     status: 'UMAR Voice API is running',
     language: 'Urdu (Arabic script)',
     endpoints: {
-      transcribe: 'Speech to text - Powered by OpenAI Whisper (language: ur)',
       romanize: 'Arabic Urdu to Roman Urdu - Powered by OpenAI GPT-4o-mini',
       chat: 'AI customer response in Arabic Urdu - Powered by OpenAI GPT-4o',
       speak: 'Text to speech - Powered by ElevenLabs (eleven_multilingual_v2)',
     },
+    stt: {
+      provider: 'Soniox WebSocket API',
+      note: 'Speech-to-Text is handled directly via WebSocket from client',
+      endpoint: '/api/soniox-key (provides API key for client)',
+    },
     requiredEnvVars: [
       'NEXT_PUBLIC_OPENAI_API_KEY',
+      'SONIOX_API_KEY',
       'ELEVENLABS_API_KEY',
       'ELEVENLABS_VOICE_ID (optional)',
     ],
     notes: [
-      'STT uses OpenAI Whisper for reliable transcription',
+      'STT uses Soniox WebSocket API for real-time transcription with low latency',
       'TTS uses ElevenLabs multilingual model for natural speech',
       'Roman Urdu is generated separately for display purposes only',
     ],
