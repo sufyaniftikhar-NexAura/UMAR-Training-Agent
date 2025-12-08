@@ -127,8 +127,12 @@ export default function ConversationPage() {
       return;
     }
 
+    // Safety check - but logs instead of just failing silently
     if (isMutedRef.current || isProcessingRef.current) {
-      console.log('Skipping Soniox start - muted:', isMutedRef.current, 'processing:', isProcessingRef.current);
+      console.warn('Skipping Soniox start - flags blocking:', { 
+        muted: isMutedRef.current, 
+        processing: isProcessingRef.current 
+      });
       return;
     }
 
@@ -183,9 +187,10 @@ export default function ConversationPage() {
           }
         },
       });
+      // Force status update
       setVoiceStatus('listening');
     } catch (e) {
-      console.error("Error starting Soniox:", e);
+      console.error("Error calling Soniox start:", e);
     }
   }, []);
 
@@ -381,7 +386,10 @@ export default function ConversationPage() {
     await speakText(aiMsg.content);
 
     // Restart listening
-    if (isMicActiveRef.current && !isMutedRef.current) {
+    if (isMicActiveRef.current) {
+      // Force clean slate
+      isMutedRef.current = false;
+      isProcessingRef.current = false;
       setTimeout(() => startSonioxTranscription(), 200);
     }
   };
@@ -432,13 +440,20 @@ export default function ConversationPage() {
 
     await speakText(aiMsg.content);
 
-    // FORCE RESTART LISTENING
-    // We use a small timeout to ensure the audio element is fully released
-    // and the previous Soniox session is cleared.
+    // --- CRITICAL FIX: FORCE RESTART LISTENING ---
+    // The previous logic relied on passive state checks.
+    // We now explicitly FORCE the flags to 'ready' before calling start.
     if (isMicActiveRef.current) {
-        console.log("Response finished, restarting listener via timeout...");
+        console.log("Response finished, restarting listener via safe timeout...");
         setTimeout(() => {
-            if (isMicActiveRef.current && !isMutedRef.current) {
+            // Force reset flags to ensure we don't get blocked
+            isMutedRef.current = false;
+            setIsMuted(false); 
+            isProcessingRef.current = false;
+            setIsProcessing(false);
+            
+            // Now start
+            if (isMicActiveRef.current) {
                 startSonioxTranscription();
             }
         }, 500); 
@@ -612,7 +627,10 @@ export default function ConversationPage() {
       setPartialTranscript('');
       accumulatedTranscriptRef.current = '';
     } else {
-      if (isMicActiveRef.current && !isProcessingRef.current) {
+      if (isMicActiveRef.current) {
+        // Force reset flags just in case
+        isProcessingRef.current = false;
+        setIsProcessing(false);
         startSonioxTranscription();
       }
     }
@@ -651,10 +669,44 @@ export default function ConversationPage() {
     router.push('/evaluation');
   };
 
+  // Get status display - ADDED BACK HERE
+  const getStatusDisplay = () => {
+    switch (voiceStatus) {
+      case 'listening':
+        return { icon: '🟢', text: 'Listening... Speak when ready' };
+      case 'speaking':
+        return { icon: '🔵', text: 'You\'re speaking...' };
+      case 'processing':
+        return { icon: '⏳', text: 'Processing your speech...' };
+      case 'ai-responding':
+        return { icon: '🤖', text: 'AI is responding...' };
+      default:
+        return { icon: '⚪', text: 'Ready' };
+    }
+  };
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      isMicActiveRef.current = false;
+
+      if (sonioxClientRef.current) {
+        try {
+          sonioxClientRef.current.cancel();
+        } catch (e) {
+          console.log('Cleanup: Error canceling Soniox:', e);
+        }
+      }
+
+      if (endpointTimerRef.current) {
+        clearTimeout(endpointTimerRef.current);
+      }
+    };
+  }, []);
+
   const statusDisplay = getStatusDisplay();
 
   return (
-    // ... (Keep your existing JSX for the return method exactly as is, it is fine)
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
       <audio ref={audioRef} className="hidden" />
 
