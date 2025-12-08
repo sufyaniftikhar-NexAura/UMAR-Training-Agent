@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { Mic, MicOff, Phone, PhoneOff, Volume2, VolumeX } from 'lucide-react';
 import { getRandomScenario, Scenario } from '@/lib/scenarios';
-import { SonioxClient } from '@soniox/speech-to-text-web';
+import type { SonioxClient as SonioxClientType } from '@soniox/speech-to-text-web';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -42,7 +42,7 @@ export default function ConversationPage() {
 
   // Refs
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const sonioxClientRef = useRef<SonioxClient | null>(null);
+  const sonioxClientRef = useRef<SonioxClientType | null>(null);
 
   // CRITICAL: These refs mirror state for use in callbacks
   const isMicActiveRef = useRef(false);
@@ -76,6 +76,9 @@ export default function ConversationPage() {
     console.log('Initializing Soniox WebSocket client...');
 
     try {
+      // Dynamically import Soniox SDK to avoid SSR issues
+      const { SonioxClient } = await import('@soniox/speech-to-text-web');
+
       const client = new SonioxClient({
         apiKey: async () => {
           const response = await fetch('/api/soniox-key');
