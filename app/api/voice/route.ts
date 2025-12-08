@@ -11,13 +11,16 @@ export async function POST(request: NextRequest) {
   try {
     const { action, text, isFirst, scenario, conversationHistory } = await request.json();
 
-    const openaiApiKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY;
+    const openaiApiKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY || process.env.OPENAI_API_KEY;
     const elevenlabsApiKey = process.env.ELEVENLABS_API_KEY;
+
+    console.log('API route called:', { action, hasOpenAIKey: !!openaiApiKey, hasElevenLabsKey: !!elevenlabsApiKey });
 
     // OpenAI key is still needed for chat/romanize actions
     if (!openaiApiKey) {
+      console.error('OpenAI API key not found in environment');
       return NextResponse.json(
-        { error: 'OpenAI API key not configured' },
+        { error: 'OpenAI API key not configured', details: 'API key missing from environment' },
         { status: 500 }
       );
     }
@@ -84,7 +87,13 @@ export async function POST(request: NextRequest) {
         // Count exchanges to track conversation progress
         const exchangeCount = messages.filter(m => m.role === 'user').length;
 
-        console.log('Chat request:', { isFirst, exchangeCount, historyLength: historyText.length });
+        console.log('Chat request:', {
+          isFirst,
+          exchangeCount,
+          historyLength: historyText.length,
+          scenarioId: scenario.id,
+          hasApiKey: !!openaiApiKey
+        });
 
         let systemPrompt = '';
         let userPrompt = '';
@@ -249,9 +258,10 @@ Reply naturally (1-2 sentences). If it's time to end, include [END_CALL] at the 
           shouldEnd: shouldEnd
         });
       } catch (error) {
-        console.error('Chat error:', error);
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        console.error('Chat error:', errorMessage, error);
         return NextResponse.json(
-          { error: 'Chat failed' },
+          { error: 'Chat failed', details: errorMessage },
           { status: 500 }
         );
       }
