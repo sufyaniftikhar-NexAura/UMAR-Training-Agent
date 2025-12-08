@@ -465,7 +465,7 @@ export default function ConversationPage() {
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
         console.error('Chat API error:', response.status, errorData);
-        throw new Error(`Chat failed: ${response.status}`);
+        throw new Error(`Chat failed: ${response.status} - ${errorData.details || errorData.error || 'Unknown'}`);
       }
 
       const data = await response.json();
