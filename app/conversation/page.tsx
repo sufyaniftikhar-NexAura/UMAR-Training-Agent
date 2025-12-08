@@ -136,54 +136,57 @@ export default function ConversationPage() {
     accumulatedTranscriptRef.current = '';
     setPartialTranscript('');
 
-    sonioxClientRef.current.start({
-      model: 'stt-rt-preview',
-      languageHints: ['ur', 'en'], // Urdu and English hints
-      enableEndpointDetection: true, // Detect when user stops speaking
-      onPartialResult: (result) => {
-        // Process tokens to get transcript
-        if (result.tokens && result.tokens.length > 0) {
-          // Build transcript from tokens
-          const finalTokens = result.tokens.filter(t => t.is_final);
-          const partialTokens = result.tokens.filter(t => !t.is_final);
+    try {
+      sonioxClientRef.current.start({
+        model: 'stt-rt-preview',
+        languageHints: ['ur', 'en'], // Urdu and English hints
+        enableEndpointDetection: true, // Detect when user stops speaking
+        onPartialResult: (result) => {
+          // Process tokens to get transcript
+          if (result.tokens && result.tokens.length > 0) {
+            // Build transcript from tokens
+            const finalTokens = result.tokens.filter(t => t.is_final);
+            const partialTokens = result.tokens.filter(t => !t.is_final);
 
-          // Update accumulated transcript with final tokens
-          const finalText = finalTokens.map(t => t.text).join('');
-          const partialText = partialTokens.map(t => t.text).join('');
+            // Update accumulated transcript with final tokens
+            const finalText = finalTokens.map(t => t.text).join('');
+            const partialText = partialTokens.map(t => t.text).join('');
 
-          if (finalText) {
-            accumulatedTranscriptRef.current += finalText;
+            if (finalText) {
+              accumulatedTranscriptRef.current += finalText;
+            }
+
+            // Display current transcript (accumulated + partial)
+            const displayText = accumulatedTranscriptRef.current + partialText;
+            setPartialTranscript(displayText);
+
+            // Check for endpoint (user stopped speaking)
+            const hasEndpoint = result.tokens.some(t => t.is_final && t.text === '');
+
+            // Reset endpoint timer on new speech
+            if (endpointTimerRef.current) {
+              clearTimeout(endpointTimerRef.current);
+              endpointTimerRef.current = null;
+            }
+
+            // If we have final tokens, start a silence timer
+            if (finalTokens.length > 0 && accumulatedTranscriptRef.current.trim().length > 0) {
+              endpointTimerRef.current = setTimeout(() => {
+                // If we have accumulated transcript and no new speech, process it
+                if (accumulatedTranscriptRef.current.trim().length > 0 && !isProcessingRef.current) {
+                  const transcript = accumulatedTranscriptRef.current.trim();
+                  console.log('Endpoint detected, processing transcript:', transcript);
+                  handleTranscriptComplete(transcript);
+                }
+              }, 1500); // 1.5 second silence threshold
+            }
           }
-
-          // Display current transcript (accumulated + partial)
-          const displayText = accumulatedTranscriptRef.current + partialText;
-          setPartialTranscript(displayText);
-
-          // Check for endpoint (user stopped speaking)
-          const hasEndpoint = result.tokens.some(t => t.is_final && t.text === '');
-
-          // Reset endpoint timer on new speech
-          if (endpointTimerRef.current) {
-            clearTimeout(endpointTimerRef.current);
-            endpointTimerRef.current = null;
-          }
-
-          // If we have final tokens, start a silence timer
-          if (finalTokens.length > 0 && accumulatedTranscriptRef.current.trim().length > 0) {
-            endpointTimerRef.current = setTimeout(() => {
-              // If we have accumulated transcript and no new speech, process it
-              if (accumulatedTranscriptRef.current.trim().length > 0 && !isProcessingRef.current) {
-                const transcript = accumulatedTranscriptRef.current.trim();
-                console.log('Endpoint detected, processing transcript:', transcript);
-                handleTranscriptComplete(transcript);
-              }
-            }, 1500); // 1.5 second silence threshold
-          }
-        }
-      },
-    });
-
-    setVoiceStatus('listening');
+        },
+      });
+      setVoiceStatus('listening');
+    } catch (e) {
+      console.error("Error starting Soniox:", e);
+    }
   }, []);
 
   // Handle completed transcript
@@ -243,7 +246,7 @@ export default function ConversationPage() {
     } catch (error) {
       console.error('Processing error:', error);
       setVoiceStatus('listening');
-      // Restart transcription
+      // Restart transcription if error
       if (isMicActiveRef.current && !isMutedRef.current) {
         startSonioxTranscription();
       }
@@ -279,14 +282,16 @@ export default function ConversationPage() {
     setMessages([introMsg]);
     messagesRef.current = [introMsg];
 
-    await speakText(introMsg.content);
-
-    // Start continuous listening with Soniox AFTER TTS finishes
+    // Important: Set flags before speaking so we know we are active
     isMicActiveRef.current = true;
+    setIsMicActive(true);
     isMutedRef.current = false;
     isProcessingRef.current = false;
-    setIsMicActive(true);
 
+    await speakText(introMsg.content);
+
+    // Explicitly start listening after intro
+    console.log("Intro finished, starting listener...");
     startSonioxTranscription();
   };
 
@@ -321,7 +326,7 @@ export default function ConversationPage() {
       // Automatically move to roleplay after announcement
       setTimeout(() => {
         startRoleplay();
-      }, 2000);
+      }, 1500);
 
     } else {
       const clarifyMsg: Message = {
@@ -377,7 +382,7 @@ export default function ConversationPage() {
 
     // Restart listening
     if (isMicActiveRef.current && !isMutedRef.current) {
-      startSonioxTranscription();
+      setTimeout(() => startSonioxTranscription(), 200);
     }
   };
 
@@ -427,9 +432,16 @@ export default function ConversationPage() {
 
     await speakText(aiMsg.content);
 
-    // Restart listening
-    if (isMicActiveRef.current && !isMutedRef.current) {
-      startSonioxTranscription();
+    // FORCE RESTART LISTENING
+    // We use a small timeout to ensure the audio element is fully released
+    // and the previous Soniox session is cleared.
+    if (isMicActiveRef.current) {
+        console.log("Response finished, restarting listener via timeout...");
+        setTimeout(() => {
+            if (isMicActiveRef.current && !isMutedRef.current) {
+                startSonioxTranscription();
+            }
+        }, 500); 
     }
   };
 
@@ -474,8 +486,6 @@ export default function ConversationPage() {
         console.error('Invalid chat response:', data);
         throw new Error('Invalid response from chat API');
       }
-
-      console.log('AI response received:', data.response.substring(0, 50));
 
       return {
         text: data.response,
@@ -525,7 +535,7 @@ export default function ConversationPage() {
       }
     }
 
-    // Mute microphone while AI is speaking to prevent feedback
+    // Mute microphone while AI is speaking
     isMutedRef.current = true;
     setIsMuted(true);
     setVoiceStatus('ai-responding');
@@ -543,19 +553,11 @@ export default function ConversationPage() {
       });
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        console.error('TTS API error:', response.status, errorData);
         throw new Error(`TTS failed: ${response.status}`);
       }
 
       const data = await response.json();
-
-      if (!data.audio) {
-        console.error('TTS returned no audio data');
-        throw new Error('No audio data returned');
-      }
-
-      console.log('TTS received audio, creating blob...');
+      if (!data.audio) throw new Error('No audio data returned');
 
       const audioBlob = new Blob(
         [Uint8Array.from(atob(data.audio), c => c.charCodeAt(0))],
@@ -563,30 +565,26 @@ export default function ConversationPage() {
       );
       const audioUrl = URL.createObjectURL(audioBlob);
 
-      console.log('Playing audio, blob size:', audioBlob.size, 'bytes');
-
       return new Promise<void>((resolve) => {
         if (audioRef.current) {
           audioRef.current.src = audioUrl;
           audioRef.current.onended = () => {
             console.log('Audio playback ended');
-            // Unmute mic after AI finishes speaking
+            // Unmute mic logic is handled by caller to ensure sync
             isMutedRef.current = false;
             setIsMuted(false);
             URL.revokeObjectURL(audioUrl);
             resolve();
           };
-          audioRef.current.onerror = (e) => {
-            console.error('Audio playback error:', e);
-            isMutedRef.current = false;
-            setIsMuted(false);
-            resolve();
+          audioRef.current.onerror = () => {
+             isMutedRef.current = false;
+             setIsMuted(false);
+             resolve();
           };
-          audioRef.current.play().catch((e) => {
-            console.error('Audio play() failed:', e);
-            isMutedRef.current = false;
-            setIsMuted(false);
-            resolve();
+          audioRef.current.play().catch(() => {
+             isMutedRef.current = false;
+             setIsMuted(false);
+             resolve();
           });
         } else {
           resolve();
@@ -606,18 +604,14 @@ export default function ConversationPage() {
     setIsMuted(newMuted);
 
     if (newMuted) {
-      // Stop Soniox when muting
       if (sonioxClientRef.current) {
         try {
           sonioxClientRef.current.cancel();
-        } catch (e) {
-          console.log('Error canceling Soniox on mute:', e);
-        }
+        } catch (e) {}
       }
       setPartialTranscript('');
       accumulatedTranscriptRef.current = '';
     } else {
-      // Restart Soniox when unmuting
       if (isMicActiveRef.current && !isProcessingRef.current) {
         startSonioxTranscription();
       }
@@ -628,18 +622,14 @@ export default function ConversationPage() {
   const endSession = (natural: boolean = false) => {
     console.log('Ending session, natural:', natural);
 
-    // Stop Soniox
     isMicActiveRef.current = false;
     if (sonioxClientRef.current) {
       try {
         sonioxClientRef.current.cancel();
-      } catch (e) {
-        console.log('Error canceling Soniox on end:', e);
-      }
+      } catch (e) {}
       sonioxClientRef.current = null;
     }
 
-    // Clear timers
     if (endpointTimerRef.current) {
       clearTimeout(endpointTimerRef.current);
     }
@@ -647,12 +637,10 @@ export default function ConversationPage() {
     setIsMicActive(false);
     setIsConnected(false);
 
-    // Navigate to evaluation page with conversation data
     const duration = sessionStartTime
       ? Math.floor((new Date().getTime() - sessionStartTime.getTime()) / 1000)
       : 0;
 
-    // Store conversation data in sessionStorage
     sessionStorage.setItem('umar_conversation', JSON.stringify({
       messages: messagesRef.current,
       scenario: currentScenarioRef.current,
@@ -663,44 +651,10 @@ export default function ConversationPage() {
     router.push('/evaluation');
   };
 
-  // Get status display
-  const getStatusDisplay = () => {
-    switch (voiceStatus) {
-      case 'listening':
-        return { icon: '🟢', text: 'Listening... Speak when ready' };
-      case 'speaking':
-        return { icon: '🔵', text: 'You\'re speaking...' };
-      case 'processing':
-        return { icon: '⏳', text: 'Processing your speech...' };
-      case 'ai-responding':
-        return { icon: '🤖', text: 'AI is responding...' };
-      default:
-        return { icon: '⚪', text: 'Ready' };
-    }
-  };
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      isMicActiveRef.current = false;
-
-      if (sonioxClientRef.current) {
-        try {
-          sonioxClientRef.current.cancel();
-        } catch (e) {
-          console.log('Cleanup: Error canceling Soniox:', e);
-        }
-      }
-
-      if (endpointTimerRef.current) {
-        clearTimeout(endpointTimerRef.current);
-      }
-    };
-  }, []);
-
   const statusDisplay = getStatusDisplay();
 
   return (
+    // ... (Keep your existing JSX for the return method exactly as is, it is fine)
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
       <audio ref={audioRef} className="hidden" />
 
@@ -897,7 +851,6 @@ export default function ConversationPage() {
   );
 }
 
-// Session Timer Component
 function SessionTimer({ startTime }: { startTime: Date }) {
   const [elapsed, setElapsed] = useState(0);
 
