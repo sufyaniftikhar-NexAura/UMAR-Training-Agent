@@ -2,24 +2,14 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { 
-  ArrowLeft, 
-  Award, 
-  TrendingUp, 
-  TrendingDown, 
-  Clock, 
-  MessageSquare,
+import {
+  ArrowLeft,
+  Award,
+  TrendingUp,
+  TrendingDown,
   ChevronDown,
   ChevronUp
 } from 'lucide-react';
-import { 
-  EvaluationResult, 
-  generateEvaluation, 
-  getScoreColor, 
-  getScoreBackgroundColor,
-  formatDuration,
-  getPerformanceMessage 
-} from '@/lib/evaluation';
 import { Scenario } from '@/lib/scenarios';
 
 interface Message {
@@ -34,6 +24,68 @@ interface ConversationData {
   scenario: Scenario;
   duration: number;
   endedNaturally: boolean;
+}
+
+interface CategoryScore {
+  score: number;
+  feedback: string;
+  feedbackUrdu: string;
+}
+
+interface EvaluationResult {
+  overallScore: number;
+  overallGrade: string;
+  categories: {
+    tone: CategoryScore;
+    empathy: CategoryScore;
+    structure: CategoryScore;
+    clarity: CategoryScore;
+    processAdherence: CategoryScore;
+    resolution: CategoryScore;
+  };
+  strengths: string[];
+  strengthsUrdu: string[];
+  improvements: string[];
+  improvementsUrdu: string[];
+  examples: {
+    good: Array<{ quote: string; reason: string; reasonUrdu: string }>;
+    needsWork: Array<{ quote: string; reason: string; reasonUrdu: string }>;
+  };
+  summaryEnglish: string;
+  summaryUrdu: string;
+  messageCount: number;
+  conversationDuration: number;
+}
+
+// Helper functions
+function getScoreColor(score: number): string {
+  if (score >= 90) return 'text-green-600';
+  if (score >= 80) return 'text-blue-600';
+  if (score >= 70) return 'text-yellow-600';
+  if (score >= 60) return 'text-orange-600';
+  return 'text-red-600';
+}
+
+function getScoreBackgroundColor(score: number): string {
+  if (score >= 90) return 'bg-green-100';
+  if (score >= 80) return 'bg-blue-100';
+  if (score >= 70) return 'bg-yellow-100';
+  if (score >= 60) return 'bg-orange-100';
+  return 'bg-red-100';
+}
+
+function formatDuration(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return `${minutes}:${secs.toString().padStart(2, '0')}`;
+}
+
+function getPerformanceMessage(score: number): { english: string; urdu: string } {
+  if (score >= 90) return { english: 'Excellent Performance!', urdu: 'بہترین کارکردگی!' };
+  if (score >= 80) return { english: 'Good Performance', urdu: 'اچھی کارکردگی' };
+  if (score >= 70) return { english: 'Satisfactory Performance', urdu: 'تسلی بخش کارکردگی' };
+  if (score >= 60) return { english: 'Needs Improvement', urdu: 'بہتری کی ضرورت ہے' };
+  return { english: 'Needs Significant Improvement', urdu: 'کافی بہتری کی ضرورت ہے' };
 }
 
 export default function EvaluationPage() {
@@ -97,32 +149,29 @@ export default function EvaluationPage() {
 
       setConversationData(data);
 
-      // Generate evaluation using API route instead of client-side call
-      const apiKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY;
+      // Generate evaluation using server-side API route
+      console.log('Calling evaluation API...');
 
-      if (!apiKey) {
-        console.error('OpenAI API key not found in environment');
-        setError('API key not configured. Please check your environment settings.');
-        setIsLoading(false);
-        return;
-      }
-
-      // Convert messages to proper format (handle Date serialization)
-      const formattedMessages = data.messages.map(m => ({
-        role: m.role,
-        content: m.content,
-        timestamp: typeof m.timestamp === 'string' ? new Date(m.timestamp) : m.timestamp
-      }));
-
-      console.log('Generating evaluation...');
-
-      const result = await generateEvaluation({
-        conversation: formattedMessages,
-        scenario: data.scenario,
-        duration: data.duration,
-        apiKey: apiKey,
+      const response = await fetch('/api/evaluate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: data.messages.map(m => ({
+            role: m.role,
+            content: m.content
+          })),
+          scenario: data.scenario,
+          duration: data.duration
+        })
       });
 
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        console.error('Evaluation API error:', response.status, errorData);
+        throw new Error(errorData.details || errorData.error || `API returned ${response.status}`);
+      }
+
+      const result = await response.json();
       console.log('Evaluation generated:', { overallScore: result.overallScore });
 
       setEvaluation(result);
